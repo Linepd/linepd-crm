@@ -1,93 +1,140 @@
 import React from "react";
-import { Link, useLocation } from "react-router-dom";
-import { loadState, saveState, uid } from "../lib/store";
-
-function useQuery() {
-  const { search } = useLocation();
-  return React.useMemo(() => new URLSearchParams(search), [search]);
-}
+import { useLocation, Link } from "react-router-dom";
+import { supabase } from "../supabaseClient";
 
 export default function Photos() {
-  const q = useQuery();
-  const caseId = q.get("caseId") || "";
-  const [state, setState] = React.useState(loadState());
-  const [selectedCaseId, setSelectedCaseId] = React.useState(caseId);
-  const [note, setNote] = React.useState("");
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+
+  const jobId = params.get("jobId");
+  const changeId = params.get("changeId");
+
+  const isChange = !!changeId;
+
+  const [photos, setPhotos] = React.useState([]);
+  const [uploading, setUploading] = React.useState(false);
+
+  async function load() {
+    const table = isChange ? "job_change_photos" : "job_photos";
+    const column = isChange ? "change_id" : "job_id";
+
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .eq(column, isChange ? changeId : jobId)
+      .order("created_at", { ascending: false });
+
+    if (error) alert(error.message);
+    else setPhotos(data || []);
+  }
 
   React.useEffect(() => {
-    setSelectedCaseId(caseId);
-  }, [caseId]);
+    load();
+  }, [jobId, changeId]);
 
-  function refresh() { setState(loadState()); }
-
-  async function onPickFile(e) {
-    const file = e.target.files?.[0];
+  async function upload(e) {
+    const file = e.target.files[0];
     if (!file) return;
-    if (!selectedCaseId) return alert("먼저 설치건을 선택해줘.");
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const s = loadState();
-      s.photos.unshift({
-        id: uid("photo"),
-        caseId: selectedCaseId,
-        dataUrl: reader.result,
-        note: note.trim(),
-        createdAt: new Date().toISOString()
-      });
-      saveState(s);
-      setNote("");
-      refresh();
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
+    setUploading(true);
+
+    const ext = file.name.split(".").pop();
+    const fileName = `${Date.now()}.${ext}`;
+    const path = isChange
+      ? `changes/${changeId}/${fileName}`
+      : `jobs/${jobId}/${fileName}`;
+
+    const { error: upErr } = await supabase.storage
+      .from("photos")
+      .upload(path, file);
+
+    if (upErr) {
+      alert(upErr.message);
+      setUploading(false);
+      return;
+    }
+
+    const { data } = supabase.storage.from("photos").getPublicUrl(path);
+
+    const table = isChange ? "job_change_photos" : "job_photos";
+    const payload = isChange
+      ? { change_id: changeId, url: data.publicUrl }
+      : { job_id: jobId, url: data.publicUrl };
+
+    const { error } = await supabase.from(table).insert(payload);
+
+    if (error) alert(error.message);
+
+    setUploading(false);
+    load();
   }
 
-  function removePhoto(id) {
-    const s = loadState();
-    s.photos = s.photos.filter(p => p.id !== id);
-    saveState(s);
-    refresh();
-  }
+  async function remove(photo) {
+    if (!confirm("이 사진을 삭제할까?")) return;
 
-  const cases = state.cases;
-  const filtered = selectedCaseId
-    ? state.photos.filter(p => p.caseId === selectedCaseId)
-    : state.photos;
+    const path = photo.url.split("/storage/v1/object/public/photos/")[1];
+    await supabase.storage.from("photos").remove([path]);
+
+    const table = isChange ? "job_change_photos" : "job_photos";
+    await supabase.from(table).delete().eq("id", photo.id);
+
+    load();
+  }
 
   return (
-    <div style={{maxWidth:900, margin:"24px auto", padding:16}}>
-      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-        <h2>사진</h2>
-        <Link to="/"><button>← 대시보드</button></Link>
+    <div style={{ maxWidth: 900, margin: "24px auto", padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <h2>{isChange ? "변동건 사진" : "설치건 사진"}</h2>
+        <Link to="/cases">
+          <button>← 돌아가기</button>
+        </Link>
       </div>
 
-      <div style={{display:"grid", gap:8, marginTop:12}}>
-        <label>설치건 선택</label>
-        <select value={selectedCaseId} onChange={(e)=>setSelectedCaseId(e.target.value)} style={{padding:10}}>
-          <option value="">(선택) 전체 보기</option>
-          {cases.map(c => <option key={c.id} value={c.id}>{c.name} | {c.address}</option>)}
-        </select>
+      <input
+        type="file"
+        accept="image/*"
+        onChange={upload}
+        disabled={uploading}
+        style={{ marginBottom: 12 }}
+      />
 
-        <input value={note} onChange={e=>setNote(e.target.value)} placeholder="사진 메모(선택)" style={{padding:10}} />
-        <input type="file" accept="image/*" onChange={onPickFile} />
-        <div style={{opacity:.7, fontSize:13}}>
-          * 이 버전은 사진을 LocalStorage에 저장해서 용량이 크면 느려질 수 있어. 다음에 Supabase Storage로 옮길 거야.
-        </div>
-      </div>
+      {uploading && <div>업로드 중…</div>}
+      {!uploading && photos.length === 0 && <div>사진이 없어.</div>}
 
-      <h3 style={{marginTop:18}}>
-        {selectedCaseId ? "설치건별 사진만 보기" : "전체 사진"}
-      </h3>
-
-      {filtered.length === 0 && <div style={{opacity:.7}}>사진이 없어.</div>}
-
-      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:12}}>
-        {filtered.map(p => (
-          <div key={p.id} style={{border:"1px solid #3333", borderRadius:8, padding:10}}>
-            <img src={p.dataUrl} alt="" style={{width:"100%", borderRadius:6}} />
-            {p.note && <div style={{marginTop:6}}>{p.note}</div>}
-            <button onClick={()=>removePhoto(p.id)} style={{marginTop:8}}>삭제</button>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
+          gap: 10,
+        }}
+      >
+        {photos.map((p) => (
+          <div key={p.id} style={{ position: "relative" }}>
+            <img
+              src={p.url}
+              alt=""
+              style={{
+                width: "100%",
+                height: 120,
+                objectFit: "cover",
+                borderRadius: 6,
+              }}
+            />
+            <button
+              onClick={() => remove(p)}
+              style={{
+                position: "absolute",
+                top: 4,
+                right: 4,
+                background: "rgba(0,0,0,0.6)",
+                color: "#fff",
+                border: "none",
+                borderRadius: 4,
+                cursor: "pointer",
+              }}
+            >
+              ✕
+            </button>
           </div>
         ))}
       </div>
